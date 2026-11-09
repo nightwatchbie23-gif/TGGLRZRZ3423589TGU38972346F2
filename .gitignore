@@ -1,5 +1,9 @@
 node_modules/
 .env
 .env.local
-.vercel/
+bot/.env
+bot/node_modules/
+backups/
+bot/backups/
 *.log
+.vercel/

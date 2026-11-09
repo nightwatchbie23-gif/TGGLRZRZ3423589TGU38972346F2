@@ -16,6 +16,7 @@ const {
     listLicenses,
     deleteLicense
 } = require('../lib/license-service');
+const { recordAudit } = require('../lib/observability');
 const { success, methodNotAllowed, handleError } = require('../lib/response');
 
 const ALLOWED_METHODS = 'GET, POST, PATCH, DELETE';
@@ -69,12 +70,30 @@ function createLicensesHandler(options = {}) {
             if (method === 'POST') {
                 const input = validateCreatePayload(parseRequestBody(req.body));
                 const license = await createLicense(repository, input, { now: currentTime });
+                await recordAudit(repository.client, {
+                    eventType: 'license_created',
+                    actor: 'api-admin',
+                    target: license && license.license_key,
+                    details: {
+                        expires_at: license && license.expires_at,
+                        is_active: license && license.is_active
+                    }
+                });
                 return success(res, 201, 'License created', { license });
             }
 
             if (method === 'PATCH') {
                 const input = validateUpdatePayload(parseRequestBody(req.body));
                 const license = await updateLicense(repository, input, { now: currentTime });
+                await recordAudit(repository.client, {
+                    eventType: `license_${input.action}`,
+                    actor: 'api-admin',
+                    target: license && license.license_key,
+                    details: {
+                        is_active: license && license.is_active,
+                        expires_at: license && license.expires_at
+                    }
+                });
                 return success(res, 200, 'License updated', { license });
             }
 
@@ -87,6 +106,11 @@ function createLicensesHandler(options = {}) {
 
             const licenseKey = validateLicenseKey(rawLicenseKey);
             await deleteLicense(repository, licenseKey);
+            await recordAudit(repository.client, {
+                eventType: 'license_deleted',
+                actor: 'api-admin',
+                target: licenseKey
+            });
             return success(res, 200, 'License deleted');
         } catch (error) {
             return handleError(res, error, 'licenses');
