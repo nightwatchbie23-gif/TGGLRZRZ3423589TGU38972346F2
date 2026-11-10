@@ -11,8 +11,9 @@ const DATA = new SlashCommandBuilder()
     .addSubcommand((sc) => sc
         .setName('ban')
         .setDescription('Ban a device from using TGGLR')
-        .addStringOption((opt) => opt.setName('hwid').setDescription('Full HWID').setRequired(true))
-        .addStringOption((opt) => opt.setName('reason').setDescription('Reason (required)').setRequired(true)))
+        .addStringOption((opt) => opt.setName('hwid').setDescription('Full HWID').setRequired(false))
+        .addUserOption((opt) => opt.setName('user').setDescription('Discord user to ban their associated HWID').setRequired(false))
+        .addStringOption((opt) => opt.setName('reason').setDescription('Reason (required if no user provided)').setRequired(true))
     .addSubcommand((sc) => sc
         .setName('unban')
         .setDescription('Lift a device ban')
@@ -32,7 +33,11 @@ const DATA = new SlashCommandBuilder()
     .addSubcommand((sc) => sc
         .setName('history')
         .setDescription('Ban/unban history for a HWID')
-        .addStringOption((opt) => opt.setName('hwid').setDescription('Full HWID').setRequired(true)));
+        .addStringOption((opt) => opt.setName('hwid').setDescription('Full HWID').setRequired(true));
+    .addSubcommand((sc) => sc
+        .setName('logs')
+        .setDescription('Show license key, HWID and User ID for a HWID')
+        .addStringOption((opt) => opt.setName('hwid').setDescription('Full HWID').setRequired(false)));
 
 module.exports = {
     data: DATA,
@@ -45,6 +50,7 @@ module.exports = {
             case 'list': return subList(interaction, ctx);
             case 'info': return subInfo(interaction, ctx);
             case 'history': return subHistory(interaction, ctx);
+            case 'logs': return subLogs(interaction, ctx);
             default:
                 return interaction.reply({ embeds: [error('Unknown subcommand', 'See /hwid help.')], flags: MessageFlags.Ephemeral });
         }
@@ -60,6 +66,7 @@ function subHelp(interaction) {
         '`/hwid list` \u2013 device bans (paginated)',
         '`/hwid info` \u2013 detailed ban information',
         '`/hwid history` \u2013 ban/unban history',
+        '`/hwid logs` \u2013 show license key, HWID and User ID',
         '',
         'HWID bans are enforced by the backend at verification time and are',
         'independent of license enable/disable state.'
@@ -69,22 +76,51 @@ function subHelp(interaction) {
 
 async function subBan(interaction, ctx) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    const hwid = interaction.options.getString('hwid', true).trim();
-    const reason = interaction.options.getString('reason', true).trim();
+    const hwidOption = interaction.options.getString('hwid', false);
+    const userOption = interaction.options.getUser('user', false);
+    const reason = interaction.options.getString('reason', false) || 'No reason provided';
 
-    const ok = await ctx.db.banHwid(hwid, { reason, bannedBy: interaction.user.id });
+    let hwid = hwidOption;
+    // If user is provided, resolve their HWID from their licenses.
+    if (userOption && !hwidOption) {
+        const discordId = userOption.id;
+        try {
+            // List licenses owned by this Discord user.
+            const result = await api.listLicenses(ctx.config, { limit: 200, status: 'all', q: `discord_user_id:${discordId}` });
+            const licenses = result.licenses || [];
+            if (licenses.length === 0) {
+                return interaction.editReply({ embeds: [info('No Licenses', `User <@${discordId}> has no associated TGGLR licenses.`).flags(MessageFlags.Ephemeral)] });
+            }
+            // Use the first license's HWID.
+            hwid = licenses[0].hwid;
+            if (!hwid) {
+                return interaction.editReply({ embeds: [info('No HWID', `User <@${discordId}> has licenses but none have a bound HWID.`).flags(MessageFlags.Ephemeral)] });
+            }
+        } catch (error) {
+            console.error('[hwid ban] Failed to resolve user licenses:', error.message);
+            return interaction.editReply({ embeds: [error('Failed', 'Could not resolve the user\'s licenses. Please try providing the HWID directly.')] });
+        }
+    }
+
+    // If still no HWID, error.
+    if (!hwid) {
+        return interaction.editReply({ embeds: [error('Missing HWID', 'Please provide a HWID or a Discord user with a bound license.')] });
+    }
+
+    const reasonFinal = reason || 'No reason provided';
+    const ok = await ctx.db.banHwid(hwid, { reason: reasonFinal, bannedBy: interaction.user.id });
     if (!ok) {
         return interaction.editReply({ embeds: [error('Ban Failed', 'Could not write the ban. Check that migrations/002_bot_support.sql was applied.')] });
     }
     await ctx.db.audit('hwid_banned', {
         actor: interaction.user.id,
         target: hwid,
-        reason,
+        reason: reasonFinal,
         details: { via: 'discord /hwid ban' }
     });
-    await ctx.monitors.notifyAction('hwid', `HWID banned by <@${interaction.user.id}> \u2014 reason: ${reason}`);
+    await ctx.monitors.notifyAction('hwid', `HWID banned by <@${interaction.user.id}> — reason: ${reasonFinal}`);
     return interaction.editReply({
-        embeds: [success('Device Banned', `HWID \`${maskHwid(hwid)}\` is now banned.\nReason: ${reason}\nThe device can no longer verify licenses.`)]
+        embeds: [success('Device Banned', `HWID \`${maskHwid(hwid)}\` is now banned.\nReason: ${reasonFinal}\nThe device can no longer verify licenses.`)]
     });
 }
 
@@ -180,3 +216,55 @@ async function subHistory(interaction, ctx) {
     ).join('\n') || 'No history recorded for this device.';
     return interaction.editReply({ embeds: [embed] });
 }
+
+async function subLogs(interaction, ctx) {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const hwidOption = interaction.options.getString('hwid', false);
+    
+    let hwid = hwidOption;
+    if (!hwid) {
+        return interaction.editReply({ embeds: [error('Missing HWID', 'Please provide a HWID to view logs.')] });
+    }
+    
+    // Get ban info and associated license.
+    const { rows: bans, license } = await lookupRows(ctx, hwid);
+    const activeBan = bans.find((row) => row.active);
+    
+    // Get license metadata for user ID.
+    let userIdDisplay = 'not bound';
+    let licenseKeyDisplay = 'not found';
+    if (license) {
+        licenseKeyDisplay = license.license_key || 'not found';
+        const meta = await ctx.db.findLicenseMetadata(license.license_key).catch(() => null);
+        if (meta && meta.discord_user_id) {
+            userIdDisplay = `<@${meta.discord_user_id}> (\`${meta.discord_user_id}\`)`;
+        }
+    }
+    
+    const embed = base(`HWID Logs \u2014 \`${maskHwid(hwid)}\``, activeBan ? COLORS.error : COLORS.success);
+    embed.fields = [
+        { name: 'License Key', value: `\`${licenseKeyDisplay}\``, inline: false },
+        { name: 'HWID', value: `\`${maskHwid(hwid)}\``, inline: true },
+        { name: 'Discord User ID', value: userIdDisplay, inline: true },
+        { name: 'Ban status', value: activeBan ? `BANNED \u2014 ${activeBan.reason}` : 'Not banned', inline: false }
+    ];
+    return interaction.editReply({ embeds: [embed] });
+}
+
+module.exports = {
+    data: DATA,
+    async execute(interaction, ctx) {
+        switch (interaction.options.getSubcommand()) {
+            case 'help': return subHelp(interaction);
+            case 'ban': return subBan(interaction, ctx);
+            case 'unban': return subUnban(interaction, ctx);
+            case 'lookup': return subLookup(interaction, ctx);
+            case 'list': return subList(interaction, ctx);
+            case 'info': return subInfo(interaction, ctx);
+            case 'history': return subHistory(interaction, ctx);
+            case 'logs': return subLogs(interaction, ctx);
+            default:
+                return interaction.reply({ embeds: [error('Unknown subcommand', 'See /hwid help.')], flags: MessageFlags.Ephemeral });
+        }
+    }
+};
