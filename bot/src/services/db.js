@@ -38,7 +38,7 @@ class BotDatabase {
 
     // ---------- settings ----------
     async getSetting(key, fallback = null) {
-        return this.run('bot_settings', async () => {
+        const value = await this.run('bot_settings', async () => {
             const { data, error } = await this.client
                 .from('bot_settings')
                 .select('value')
@@ -48,11 +48,12 @@ class BotDatabase {
                 throw error;
             }
             return data ? data.value : fallback;
-        }) ?? fallback;
+        });
+        return value ?? fallback;
     }
 
     async setSetting(key, value) {
-        return this.run('bot_settings', async () => {
+        const result = await this.run('bot_settings', async () => {
             const { error } = await this.client
                 .from('bot_settings')
                 .upsert({ key, value, updated_at: new Date().toISOString() });
@@ -60,7 +61,8 @@ class BotDatabase {
                 throw error;
             }
             return true;
-        }) ?? false;
+        });
+        return result ?? false;
     }
 
     // ---------- audit ----------
@@ -100,7 +102,7 @@ class BotDatabase {
 
     // ---------- HWID bans ----------
     async banHwid(hwid, { reason, bannedBy, licenseKey } = {}) {
-        return this.run('hwid_bans', async () => {
+        const result = await this.run('hwid_bans', async () => {
             // Deactivate previous rows for this HWID so history is preserved.
             await this.client.from('hwid_bans').update({ active: false }).eq('hwid', hwid);
             const { error } = await this.client.from('hwid_bans').insert({
@@ -114,11 +116,12 @@ class BotDatabase {
                 throw error;
             }
             return true;
-        }) ?? false;
+        });
+        return result ?? false;
     }
 
     async unbanHwid(hwid) {
-        return this.run('hwid_bans', async () => {
+        const result = await this.run('hwid_bans', async () => {
             const { data, error } = await this.client
                 .from('hwid_bans')
                 .update({ active: false })
@@ -129,11 +132,12 @@ class BotDatabase {
                 throw error;
             }
             return Array.isArray(data) && data.length > 0;
-        }) ?? false;
+        });
+        return result ?? false;
     }
 
     async listBans({ limit = 10, offset = 0, hwid } = {}) {
-        return this.run('hwid_bans', async () => {
+        const result = await this.run('hwid_bans', async () => {
             let request = this.client
                 .from('hwid_bans')
                 .select('id, hwid, reason, banned_by, license_key, active, created_at', { count: 'exact' });
@@ -148,11 +152,12 @@ class BotDatabase {
             }
             return { rows: data || [], total: count || 0 };
         });
+        return result || { rows: [], total: 0 };
     }
 
     // ---------- bot events ----------
     async fetchEvents(afterId, limit = 50) {
-        return this.run('bot_events', async () => {
+        const events = await this.run('bot_events', async () => {
             const { data, error } = await this.client
                 .from('bot_events')
                 .select('id, event_type, payload, created_at')
@@ -163,7 +168,8 @@ class BotDatabase {
                 throw error;
             }
             return data || [];
-        }) ?? [];
+        });
+        return events || [];
     }
 
     // ---------- sharing alerts ----------
@@ -243,7 +249,7 @@ class BotDatabase {
 
     // ---------- license metadata (bot-managed association columns) ----------
     async updateLicenseMetadata(licenseKey, fields) {
-        return this.run('licenses', async () => {
+        const result = await this.run('licenses', async () => {
             const patch = {};
             if (fields.discordUserId !== undefined) {
                 patch.discord_user_id = fields.discordUserId;
@@ -262,7 +268,8 @@ class BotDatabase {
                 throw error;
             }
             return true;
-        }) ?? false;
+        });
+        return result ?? false;
     }
 
     async findLicenseMetadata(licenseKey) {

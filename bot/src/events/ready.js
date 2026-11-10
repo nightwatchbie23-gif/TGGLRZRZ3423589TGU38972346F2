@@ -6,10 +6,14 @@ const { REST, Routes } = require('discord.js');
 // Registers slash commands (guild-scoped for instant availability when
 // DISCORD_GUILD_ID is set, otherwise global) and starts the background monitor.
 async function onReady(ctx, client) {
+    if (ctx.readyStarted) {
+        return;
+    }
+    ctx.readyStarted = true;
     console.log(`Logged in as ${client.user.tag}`);
 
     const rest = new REST().setToken(ctx.config.discordToken);
-    const body = ctx.commands.map((command) => command.data.toJSON());
+    const body = Array.from(ctx.commands.values()).map((command) => command.data.toJSON());
     try {
         if (ctx.config.guildId) {
             await rest.put(Routes.applicationGuildCommands(ctx.config.applicationId, ctx.config.guildId), { body });

@@ -51,6 +51,12 @@ async function main() {
     client.commands = commandMap;
 
     client.once('ready', () => onReady(ctx, client));
+    client.once('clientReady', () => onReady(ctx, client));
+    client.on('error', (error) => console.error('[client] error:', error.message));
+    client.on('warn', (message) => console.warn('[client] warn:', message));
+    process.on('unhandledRejection', (reason) => {
+        console.error('[process] unhandled rejection:', reason && reason.message ? reason.message : reason);
+    });
     client.on('interactionCreate', (interaction) => onInteractionCreate(ctx, interaction));
 
     process.on('SIGINT', () => shutdown(client, monitors));
