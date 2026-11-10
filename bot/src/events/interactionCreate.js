@@ -1,9 +1,12 @@
 'use strict';
 
 const { Events, MessageFlags } = require('discord.js');
-const { isAdmin, isMaintenance, isRateLimited, maintenanceMessage } = require('../utils/guards');
+const { isAdmin, isAllowed, isMaintenance, isRateLimited, maintenanceMessage } = require('../utils/guards');
 const { error } = require('../utils/format');
 const { takePendingAction } = require('../utils/pending');
+const { handleDashboardInteraction } = require('../services/dashboard');
+
+const { handleLogsButton } = require('../commands/license');
 
 async function onInteractionCreate(ctx, interaction) {
     try {
@@ -11,8 +14,24 @@ async function onInteractionCreate(ctx, interaction) {
             return handleConfirmButton(interaction);
         }
 
+        if ((interaction.isButton() || interaction.isModalSubmit()) && interaction.customId.startsWith('dash')) {
+            return handleDashboardInteraction(ctx, interaction);
+        }
+
+        if (interaction.isButton() && interaction.customId.startsWith('logs:')) {
+            return handleLogsButton(ctx, interaction);
+        }
+
         if (interaction.isButton() && interaction.customId.startsWith('sharing:')) {
             return handleSharingButton(ctx, interaction);
+        }
+
+        if (interaction.isButton() && interaction.customId.startsWith('licdash:')) {
+            return ctx.licenseDashboard.handleInteraction(interaction, ctx);
+        }
+
+        if (interaction.isModalSubmit() && interaction.customId === 'licdashCreateModal') {
+            return ctx.licenseDashboard.handleModalSubmit(interaction, ctx);
         }
 
         if (!interaction.isChatInputCommand()) {
@@ -29,9 +48,19 @@ async function onInteractionCreate(ctx, interaction) {
             return replyEphemeral(interaction, error('Unknown Command', 'That command is not registered.'));
         }
 
-        // /help is public; everything else is administrator-only.
-        if (interaction.commandName !== 'help' && !isAdmin(ctx.config, interaction.user.id)) {
-            return replyEphemeral(interaction, error('Not Authorized', 'This bot only accepts commands from configured administrators.'));
+        // /help and /register are public (register is self-service binding);
+        // everything else needs admin or granted access.
+        const isPublic = interaction.commandName === 'help' || interaction.commandName === 'register';
+        const authorized = isPublic
+            || await isAllowed(ctx.config, ctx.db, interaction.user.id, interaction.commandName);
+        if (!authorized) {
+            const blocked = ['admin', 'system', 'notifications'].includes(interaction.commandName);
+            return replyEphemeral(interaction, error(
+                'Not Authorized',
+                blocked
+                    ? 'This command is for administrators only.'
+                    : 'You are not allowed to use this bot. Ask an administrator to grant access with /access add.'
+            ));
         }
 
         if (interaction.commandName !== 'help' && await isMaintenance(ctx.db)) {
@@ -68,7 +97,7 @@ async function handleSharingButton(ctx, interaction) {
             await interaction.editReply({
                 components: [],
                 embeds: [{
-                    color: 0x2ecc71,
+                    color: 0xc8a2c8,
                     title: 'Alert Confirmed',
                     description: `Alert #${alertId} confirmed by <@${interaction.user.id}>. The license has been disabled through the backend.`,
                     timestamp: new Date().toISOString(),

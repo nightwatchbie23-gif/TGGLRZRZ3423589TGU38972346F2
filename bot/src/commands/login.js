@@ -25,7 +25,7 @@ module.exports = {
     data: DATA,
     async execute(interaction, ctx) {
         switch (interaction.options.getSubcommand()) {
-            case 'help': return subHelp();
+            case 'help': return subHelp(interaction);
             case 'enable': return setEnabled(interaction, ctx, true);
             case 'disable': return setEnabled(interaction, ctx, false);
             case 'channel': return setChannel(interaction, ctx);
@@ -37,7 +37,7 @@ module.exports = {
     }
 };
 
-function subHelp() {
+function subHelp(interaction) {
     const embed = base('Login Commands', COLORS.primary);
     embed.description = [
         '`/login enable` \u2013 enable login notifications',

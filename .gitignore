@@ -7,3 +7,6 @@ backups/
 bot/backups/
 *.log
 .vercel/
+
+.vercel
+.env*

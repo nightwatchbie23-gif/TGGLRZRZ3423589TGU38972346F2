@@ -38,7 +38,7 @@ module.exports = {
     data: DATA,
     async execute(interaction, ctx) {
         switch (interaction.options.getSubcommand()) {
-            case 'help': return subHelp();
+            case 'help': return subHelp(interaction);
             case 'ban': return subBan(interaction, ctx);
             case 'unban': return subUnban(interaction, ctx);
             case 'lookup': return subLookup(interaction, ctx);
@@ -51,7 +51,7 @@ module.exports = {
     }
 };
 
-function subHelp() {
+function subHelp(interaction) {
     const embed = base('HWID Commands', COLORS.primary);
     embed.description = [
         '`/hwid ban` \u2013 ban a device (reason required)',

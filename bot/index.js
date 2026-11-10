@@ -11,6 +11,8 @@ const { BotDatabase } = require('./src/services/db');
 const api = require('./src/services/api');
 const { NotificationService } = require('./src/services/notifications');
 const { Monitor } = require('./src/services/monitor');
+const { LicenseDashboard } = require('./src/services/licenseDashboard');
+const { startPresenceWatcher } = require('./src/services/presence');
 const { onReady } = require('./src/events/ready');
 const { onInteractionCreate } = require('./src/events/interactionCreate');
 
@@ -22,7 +24,8 @@ const COMMANDS = [
     require('./src/commands/server'),
     require('./src/commands/notifications'),
     require('./src/commands/admin'),
-    require('./src/commands/system')
+    require('./src/commands/system'),
+    require('./src/commands/register')
 ];
 
 async function main() {
@@ -35,18 +38,42 @@ async function main() {
         process.exit(1);
     }
 
+    const wantsPresence = config.presenceIds.length > 0;
+    try {
+        await runBot(config, wantsPresence);
+    } catch (error) {
+        if (wantsPresence && /disallowed intents/i.test(error.message || '')) {
+            // The "Presence Intent" toggle is off in the Discord Developer
+            // Portal: start without status mirroring instead of crash-looping.
+            console.warn('[presence] Presence Intent is not enabled for this bot — starting WITHOUT status mirroring.');
+            console.warn('[presence] To activate it: Developer Portal > Bot > Privileged Gateway Intents > enable "Presence Intent", then restart.');
+            await runBot(config, false);
+            return;
+        }
+        throw error;
+    }
+}
+
+async function runBot(config, usePresence) {
     const client = new Client({
-        intents: [GatewayIntentBits.Guilds]
+        // GuildPresences is required to mirror the watch-list users' status;
+        // it is only requested when the watch list is enabled.
+        intents: [
+            GatewayIntentBits.Guilds,
+            ...(usePresence ? [GatewayIntentBits.GuildPresences] : [])
+        ]
     });
 
     const db = new BotDatabase(config);
     config.client = client;
+    config.presenceEnabled = usePresence;
     const notifications = new NotificationService(db, config);
     const monitors = new Monitor(client, config, db, notifications);
+    const licenseDashboard = new LicenseDashboard(config, db, notifications);
     await notifications.loadState();
 
     const commandMap = new Map(COMMANDS.map((command) => [command.data.name, command]));
-    const ctx = { config, db, api, notifications, monitors, commands: commandMap };
+    const ctx = { config, db, api, notifications, monitors, commands: commandMap, licenseDashboard };
     client.db = db;
     client.commands = commandMap;
 

@@ -5,7 +5,7 @@
 
 const COLORS = {
     primary: 0x00a8ff,
-    success: 0x2ecc71,
+    success: 0xc8a2c8,
     error: 0xe74c3c,
     warn: 0xf39c12,
     neutral: 0x95a5a6

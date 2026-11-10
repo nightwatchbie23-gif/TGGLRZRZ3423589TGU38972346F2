@@ -17,7 +17,8 @@ async function onReady(ctx, client) {
     try {
         if (ctx.config.guildId) {
             await rest.put(Routes.applicationGuildCommands(ctx.config.applicationId, ctx.config.guildId), { body });
-            console.log(`Registered ${body.length} guild commands`);
+            await rest.put(Routes.applicationCommands(ctx.config.applicationId), { body: [] });
+            console.log(`Registered ${body.length} guild commands (globals cleared)`);
         } else {
             await rest.put(Routes.applicationCommands(ctx.config.applicationId), { body });
             console.log(`Registered ${body.length} global commands`);
@@ -26,10 +27,17 @@ async function onReady(ctx, client) {
         console.error('Command registration failed:', error);
     }
 
-    client.user.setPresence({
-        activities: [{ name: 'TGGLR licenses', type: ActivityType.Watching }],
-        status: 'online'
-    });
+    const { ActivityType } = require('discord.js');
+    const { startPresenceWatcher } = require('../services/presence');
+    if (ctx.config.presenceIds.length > 0 && ctx.config.presenceEnabled) {
+        // Presence watcher owns the bot status from now on.
+        startPresenceWatcher(ctx, client);
+    } else {
+        client.user.setPresence({
+            activities: [{ name: 'TGGLR licenses', type: ActivityType.Watching }],
+            status: 'online'
+        });
+    }
 
     // Startup database check: warn if the bot migration has not been applied.
     for (const table of ['bot_events', 'audit_logs', 'hwid_bans', 'sharing_alerts', 'bot_settings']) {
@@ -42,6 +50,10 @@ async function onReady(ctx, client) {
             console.warn(`[startup] table "${table}" check failed:`, error.message);
         }
     }
+
+    // Daily automatic license backup.
+    const { startDailyBackup } = require('../services/backup');
+    startDailyBackup(ctx);
 
     await ctx.monitors.start();
 }

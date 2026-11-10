@@ -1,6 +1,11 @@
 'use strict';
 
 const { COLORS, fmtDate, maskHwid, maskKey } = require('../utils/format');
+const {
+    loginEmbed: buildLoginEmbed,
+    sharingAlertEmbed: buildSharingEmbed,
+    serverErrorEmbed: buildServerEmbed
+} = require('../commands/notifications');
 
 // Notification settings are stored in bot_settings:
 //   channels.global   -> channel id used when no per-type channel is set
@@ -12,9 +17,10 @@ const TYPES = [
     'login_success',
     'login_failure',
     'license_sharing',
-    'hwid',
-    'server',
-    'license_expiry',
+    'hwid_ban',
+    'server_error',
+    'license_created',
+    'license_added',
     'admin'
 ];
 
@@ -109,27 +115,40 @@ class NotificationService {
         }
     }
 
+    // ---------- embed builders ----------
+
     loginEmbed({ outcome, license, metadata, code, firstSeen }) {
-        const failure = outcome === 'failed';
-        const embed = {
-            color: failure ? COLORS.error : COLORS.success,
-            title: failure ? 'Login Failed' : 'Login Successful',
+        return buildLoginEmbed({ outcome, license, metadata, code, firstSeen });
+    }
+
+    sharingAlertEmbed({ licenseKey, hwid, discordUserId, alertKind, reason }) {
+        return buildSharingEmbed({ licenseKey, hwid, discordUserId, alertKind, reason });
+    }
+
+    serverErrorEmbed({ message, details }) {
+        return buildServerEmbed({ message, details });
+    }
+
+    licenseCreatedEmbed({ licenseKey, ownerId, duration, expiresAt, createdAt }) {
+        const discordMention = ownerId ? `<@${ownerId}>` : 'not bound';
+        const type = expiresAt ? 'Timed' : 'Lifetime';
+        const expires = expiresAt ? fmtDate(expiresAt) : 'never';
+        return {
+            color: COLORS.success,
+            title: '\u2705 License Created',
+            description: `License \`${maskKey(licenseKey)}\` was created and the full key was sent to the owner by DM.`,
             fields: [
-                { name: 'Minecraft username', value: String(metadata.minecraft_username || 'unknown'), inline: true },
-                { name: 'Minecraft UUID', value: String(metadata.mc_uuid || 'not provided'), inline: true },
-                { name: 'Discord ID', value: license && license.discord_user_id ? `<@${license.discord_user_id}> (${license.discord_user_id})` : 'not linked', inline: true },
-                { name: 'License key', value: maskKey(metadata.license_key), inline: true },
-                { name: 'License type', value: license && license.expires_at ? 'Timed' : 'Lifetime', inline: true },
-                { name: 'License status', value: failure ? `Rejected (${code})` : 'Active', inline: true },
-                { name: 'HWID', value: maskHwid(metadata.hwid), inline: true },
-                { name: 'TGGLR version', value: String(metadata.tgglr_version || 'not provided'), inline: true },
-                { name: 'Minecraft version', value: String(metadata.mc_version || 'not provided'), inline: true },
-                { name: 'Device', value: firstSeen ? 'First activation' : 'Returning device', inline: true }
+                { name: 'Discord Owner', value: `${discordMention} (\`${ownerId || 'not bound'}\`)`, inline: true },
+                { name: 'License Key', value: `\`${maskKey(licenseKey)}\``, inline: true },
+                { name: 'Type', value: type, inline: true },
+                { name: 'Duration', value: duration || 'lifetime', inline: true },
+                { name: 'Expires', value: expires, inline: true },
+                { name: 'Created', value: createdAt ? fmtDate(createdAt) : 'just now', inline: true },
+                { name: 'Minecraft IGN', value: 'auto-detected on first launch', inline: true }
             ],
             timestamp: new Date().toISOString(),
-            footer: { text: 'LicenseManagerTGG' }
+            footer: { text: 'LicenseManagerTGG \u2022 License Channel' }
         };
-        return embed;
     }
 }
 

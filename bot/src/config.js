@@ -37,7 +37,8 @@ function getConfig() {
             read('ADMIN_USER_IDS').split(',').map((id) => id.trim()).filter(Boolean)
         ),
         pollIntervalMs: Math.max(1000, Number(read('EVENT_POLL_INTERVAL_MS', { fallback: '3000' })) || 3000),
-        sessionGapMinutes: Math.max(1, Number(read('SESSION_GAP_MINUTES', { fallback: '10' })) || 10)
+        sessionGapMinutes: Math.max(1, Number(read('SESSION_GAP_MINUTES', { fallback: '10' })) || 10),
+        presenceIds: read('PRESENCE_WATCH_IDS').split(',').map((id) => id.trim()).filter(Boolean)
     };
 
     return cached;

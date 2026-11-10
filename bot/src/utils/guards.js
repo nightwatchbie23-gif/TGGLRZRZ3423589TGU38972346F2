@@ -28,6 +28,61 @@ function isAdmin(config, userId) {
     return config.adminUserIds.has(userId);
 }
 
+// ---------- access list ----------
+// IDs granted via /access can use normal bot commands (license, hwid, login,
+// server) but NOT admin-only commands (admin, system, notifications) and are
+// never notified as admins. Cached briefly to avoid a DB hit per command.
+
+const ACCESS_CACHE_TTL_MS = 60000;
+let accessCache = { ids: new Set(), loadedAt: 0 };
+
+function invalidateAccessCache() {
+    accessCache = { ids: new Set(), loadedAt: 0 };
+}
+
+async function loadAllowedUsers(db) {
+    if (Date.now() - accessCache.loadedAt < ACCESS_CACHE_TTL_MS) {
+        return accessCache.ids;
+    }
+    const list = await db.getSetting('allowedUsers', []);
+    accessCache = { ids: new Set(Array.isArray(list) ? list.map(String) : []), loadedAt: Date.now() };
+    return accessCache.ids;
+}
+
+async function addAllowedUser(db, userId) {
+    const ids = await loadAllowedUsers(db);
+    if (!ids.has(userId)) {
+        ids.add(userId);
+        await db.setSetting('allowedUsers', [...ids]);
+    }
+    invalidateAccessCache();
+    return ids;
+}
+
+async function removeAllowedUser(db, userId) {
+    const ids = await loadAllowedUsers(db);
+    if (ids.has(userId)) {
+        ids.delete(userId);
+        await db.setSetting('allowedUsers', [...ids]);
+    }
+    invalidateAccessCache();
+    return ids;
+}
+
+// Commands granted users are NOT allowed to run (admins only).
+const ADMIN_ONLY_COMMANDS = new Set(['admin', 'system', 'notifications']);
+
+async function isAllowed(config, db, userId, commandName) {
+    if (config.adminUserIds.has(userId)) {
+        return true;
+    }
+    if (commandName && ADMIN_ONLY_COMMANDS.has(commandName)) {
+        return false;
+    }
+    const ids = await loadAllowedUsers(db);
+    return ids.has(userId);
+}
+
 async function isMaintenance(db) {
     const state = await db.getSetting('maintenance', { enabled: false });
     return Boolean(state && state.enabled);
@@ -42,4 +97,13 @@ async function maintenanceMessage(db) {
     return parts.join('\n');
 }
 
-module.exports = { isAdmin, isMaintenance, isRateLimited, maintenanceMessage };
+module.exports = {
+    isAdmin,
+    isAllowed,
+    addAllowedUser,
+    removeAllowedUser,
+    ADMIN_ONLY_COMMANDS,
+    isMaintenance,
+    isRateLimited,
+    maintenanceMessage
+};

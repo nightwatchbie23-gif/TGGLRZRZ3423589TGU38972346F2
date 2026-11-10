@@ -26,7 +26,24 @@ const DATA = new SlashCommandBuilder()
     .addSubcommand((sc) => sc
         .setName('client-version')
         .setDescription('View or set the expected TGGLR client version')
-        .addStringOption((opt) => opt.setName('version').setDescription('Expected version (e.g. 1.2.0; omit to view)')));
+        .addStringOption((opt) => opt.setName('version').setDescription('Expected version (e.g. 1.2.0; omit to view)')))
+    .addSubcommand((sc) => sc
+        .setName('autobackup')
+        .setDescription('Configure the daily automatic license backup')
+        .addStringOption((opt) => opt.setName('setting').setDescription('What to view or change').addChoices(
+            { name: 'Status', value: 'status' },
+            { name: 'Enable', value: 'enable' },
+            { name: 'Disable', value: 'disable' },
+            { name: 'Channel', value: 'channel' },
+            { name: 'Hour (UTC)', value: 'hour' },
+            { name: 'Run now', value: 'runnow' }
+        ).setRequired(false))
+        .addChannelOption((opt) => opt.setName('channel').setDescription('Backup channel (omit = admin DMs)'))
+        .addIntegerOption((opt) => opt.setName('hour').setDescription('UTC hour 0-23')))
+    .addSubcommand((sc) => sc
+        .setName('restore')
+        .setDescription('Recreate licenses from a backup JSON file')
+        .addAttachmentOption((opt) => opt.setName('file').setDescription('Backup .json file').setRequired(true)));
 
 module.exports = {
     data: DATA,
@@ -38,6 +55,8 @@ module.exports = {
             case 'maintenance': return subMaintenance(interaction, ctx);
             case 'backup': return subBackup(interaction, ctx);
             case 'client-version': return subClientVersion(interaction, ctx);
+            case 'autobackup': return subAutoBackup(interaction, ctx);
+            case 'restore': return subRestore(interaction, ctx);
             default:
                 return interaction.reply({ embeds: [error('Unknown subcommand', 'See /admin stats.')], flags: MessageFlags.Ephemeral });
         }
@@ -152,6 +171,123 @@ async function subBackup(interaction, ctx) {
         'The file contains full license keys \u2014 keep it private and never commit it.'
     ].join('\n'));
     return interaction.editReply({ embeds: [embed] });
+}
+
+async function subAutoBackup(interaction, ctx) {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const setting = interaction.options.getString('setting') || 'status';
+    const backup = require('../services/backup');
+    const settings = await ctx.db.getSetting(backup.SETTINGS_KEY, {}) || {};
+
+    if (setting === 'enable' || setting === 'disable') {
+        settings.enabled = setting === 'enable';
+        await ctx.db.setSetting(backup.SETTINGS_KEY, settings);
+        await ctx.db.audit('autobackup_config', { actor: interaction.user.id, details: { enabled: settings.enabled } });
+        return interaction.editReply({ embeds: [success('Auto Backup', settings.enabled ? 'Daily backups are ON.' : 'Daily backups are OFF.')] });
+    }
+    if (setting === 'channel') {
+        const channel = interaction.options.getChannel('channel');
+        settings.channelId = channel ? channel.id : null;
+        await ctx.db.setSetting(backup.SETTINGS_KEY, settings);
+        return interaction.editReply({
+            embeds: [channel
+                ? success('Backup Channel Set', `Backups will be posted in <#${channel.id}> (locked admins-only channels are safest \u2014 the file contains all keys).`)
+                : info('Backup Channel Cleared', 'Backups will be sent by DM to administrators.')]
+        });
+    }
+    if (setting === 'hour') {
+        const hour = interaction.options.getInteger('hour');
+        if (hour === null || hour < 0 || hour > 23) {
+            return interaction.editReply({ embeds: [error('Invalid Hour', 'Hour must be 0\u201323 (UTC).')] });
+        }
+        settings.hour = hour;
+        await ctx.db.setSetting(backup.SETTINGS_KEY, settings);
+        return interaction.editReply({ embeds: [success('Hour Set', `The daily backup will run at UTC ${String(hour).padStart(2, '0')}:00 (once per day, caught up if the bot was off).`)] });
+    }
+    if (setting === 'runnow') {
+        const result = await backup.runBackup(ctx, { manual: true });
+        return interaction.editReply({
+            embeds: [result.delivered
+                ? success('Backup Sent', `${result.count} licenses \u2192 ${result.target}.`)
+                : error('Not Delivered', `Backup contains ${result.count} licenses but delivery failed: ${result.target}`)]
+        });
+    }
+    // status (default view)
+    const lastRunAt = settings.lastRun ? `<t:${Math.floor(new Date(settings.lastRun).getTime() / 1000)}:R>` : 'never';
+    return interaction.editReply({
+        embeds: [info('Automatic Backup', [
+            `State: ${settings.enabled === false ? '\u274C OFF' : '\u2705 ON'}`,
+            `Time: UTC ${String(settings.hour ?? '03').padStart(2, '0')}:00 daily`,
+            `Target: ${settings.channelId ? `<#${settings.channelId}>` : 'admin DMs'}`,
+            `Last run: ${lastRunAt}`,
+            '',
+            'Change with `/admin autobackup setting:...` \u2014 local copies are also kept in `bot/backups/`.'
+        ].join('\n'))]
+    });
+}
+
+async function subRestore(interaction, ctx) {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const attachment = interaction.options.getAttachment('file', true);
+    try {
+        const response = await fetch(attachment.url);
+        const payload = JSON.parse(await response.text());
+        const licenses = Array.isArray(payload) ? payload : payload.licenses;
+        if (!Array.isArray(licenses) || licenses.length === 0) {
+            return interaction.editReply({ embeds: [error('Invalid File', 'No licenses array found in that file.')] });
+        }
+        // Skip keys that still exist.
+        const existing = new Set();
+        let offset = 0;
+        while (offset < 50000) {
+            const result = await api.listLicenses(ctx.config, { limit: 200, offset, status: 'all' });
+            const rows = result.licenses || [];
+            for (const row of rows) {
+                existing.add(row.license_key);
+            }
+            if (rows.length < 200) {
+                break;
+            }
+            offset += 200;
+        }
+
+        let created = 0;
+        let skipped = 0;
+        let failed = 0;
+        for (const license of licenses) {
+            if (!license.license_key || existing.has(license.license_key)) {
+                skipped += 1;
+                continue;
+            }
+            // The backend generates keys on create; restored copies keep the
+            // original expiry. Recreating by expiry is the supported path.
+            try {
+                const copy = await api.createLicense(ctx.config, {
+                    expiresAt: license.expires_at || new Date(Date.now() + 365 * 86400 * 1000).toISOString()
+                });
+                if (license.discord_user_id ?? license.discordUserId) {
+                    await ctx.db.updateLicenseMetadata(copy.license_key, {
+                        discordUserId: license.discord_user_id ?? license.discordUserId,
+                        minecraftUsername: license.minecraft_username ?? license.minecraftUsername
+                    }).catch(() => {});
+                }
+                created += 1;
+            } catch {
+                failed += 1;
+            }
+        }
+        await ctx.db.audit('licenses_restored', { actor: interaction.user.id, details: { created, skipped, failed } });
+        return interaction.editReply({
+            embeds: [success('Restore Finished', [
+                `Created: **${created}**`,
+                `Skipped (already exist): ${skipped}`,
+                failed > 0 ? `\u26A0\uFE0F Failed: ${failed}` : '',
+                '\u2139\uFE0F Restored copies get **new keys** (the backend generates them) \u2014 re-send owners their new key with `/license list`.'
+            ].filter(Boolean).join('\n'))]
+        });
+    } catch (error_) {
+        return interaction.editReply({ embeds: [error('Restore Failed', error_.message)] });
+    }
 }
 
 async function subClientVersion(interaction, ctx) {

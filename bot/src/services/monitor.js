@@ -105,7 +105,7 @@ class Monitor {
 
         // Sharing / abuse detection.
         if (outcome === 'failed' && payload.code === 'HWID_MISMATCH') {
-            await this.trackMismatch(licenseKey);
+            await this.trackMismatch(licenseKey, payload.hwid);
         } else if (outcome === 'activated' || outcome === 'verified') {
             await this.trackSharing(licenseKey, payload.hwid, request.mc_uuid);
         }
@@ -156,31 +156,17 @@ class Monitor {
     }
 
     async notifyAlert(alertId, licenseKey, kind, details) {
-        const embed = {
-            color: COLORS.warn,
-            title: 'License Sharing Alert',
-            description: `Suspicious activity detected. Review required \u2014 no action taken automatically.`,
-            fields: [
-                { name: 'Alert ID', value: String(alertId), inline: true },
-                { name: 'License', value: maskKey(licenseKey), inline: true },
-                { name: 'Kind', value: kind, inline: true },
-                { name: 'Details', value: JSON.stringify(maskDetails(details), null, 2).slice(0, 1000), inline: false }
-            ],
-            timestamp: new Date().toISOString(),
-            footer: { text: 'Confirm or dismiss with /license sharing' }
-        };
-        const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-                .setCustomId(`sharing:confirm:${alertId}`)
-                .setLabel('Confirm (disable license)')
-                .setStyle(ButtonStyle.Danger),
-            new ButtonBuilder()
-                .setCustomId(`sharing:dismiss:${alertId}`)
-                .setLabel('Dismiss')
-                .setStyle(ButtonStyle.Secondary)
-        );
-
-        await this.notifications.send('license_sharing', { embeds: [embed], components: [row] });
+        const discordUserId = details && details.discord_user_id ? details.discord_user_id : null;
+        const hwid = details && details.hwid ? details.hwid : 'unknown';
+        const reason = details && details.reason ? details.reason : 'HWID mismatch across devices';
+        const embed = this.notifications.sharingAlertEmbed({
+            licenseKey,
+            hwid,
+            discordUserId,
+            alertKind: kind,
+            reason
+        });
+        await this.notifications.send('license_sharing', { embeds: [embed] });
         await this.notifications.notifyAdmins(embed);
     }
 
@@ -191,6 +177,15 @@ class Monitor {
         const state = this.getState(licenseKey);
         const now = Date.now();
 
+        // Fetch license metadata to get the Discord owner who shared it.
+        let ownerDiscordId = null;
+        try {
+            const license = await api.findLicenseByKey(this.config, licenseKey);
+            if (license && license.discord_user_id) {
+                ownerDiscordId = license.discord_user_id;
+            }
+        } catch { /* best effort */ }
+
         // Different Minecraft UUIDs on the same license.
         if (mcUuid) {
             const knownAt = state.uuids.get(mcUuid);
@@ -199,8 +194,11 @@ class Monitor {
                 state.uuids.set(mcUuid, now);
                 if (distinctCount >= 1) {
                     await this.raiseAlert(licenseKey, 'mc_uuid_change', {
+                        discord_user_id: ownerDiscordId,
                         mc_uuid: mcUuid,
-                        known_uuid_count: distinctCount + 1
+                        known_uuid_count: distinctCount + 1,
+                        hwid: hwid || 'unknown',
+                        detected_at: new Date(now).toISOString()
                     });
                 }
             }
@@ -222,22 +220,34 @@ class Monitor {
             state.hwids.set(hwid, now);
             if (isConcurrent) {
                 await this.raiseAlert(licenseKey, 'concurrent_sessions', {
+                    discord_user_id: ownerDiscordId,
                     hwid,
-                    distinct_hwids: state.hwids.size
+                    distinct_hwids: state.hwids.size,
+                    detected_at: new Date(now).toISOString()
                 });
             }
         }
     }
 
-    async trackMismatch(licenseKey) {
+    async trackMismatch(licenseKey, hwid) {
         const now = Date.now();
         const window = this.mismatchWindow.get(licenseKey) || [];
         const recent = window.filter((time) => now - time < 24 * 60 * 60_000);
         recent.push(now);
         this.mismatchWindow.set(licenseKey, recent);
         if (recent.length >= 3 && recent.length === window.length + 0 + 1) {
+            let ownerDiscordId = null;
+            try {
+                const license = await api.findLicenseByKey(this.config, licenseKey);
+                if (license && license.discord_user_id) {
+                    ownerDiscordId = license.discord_user_id;
+                }
+            } catch { /* best effort */ }
             await this.raiseAlert(licenseKey, 'device_churn', {
-                mismatches_24h: recent.length
+                discord_user_id: ownerDiscordId,
+                hwid,
+                mismatches_24h: recent.length,
+                detected_at: new Date(now).toISOString()
             });
         }
     }
